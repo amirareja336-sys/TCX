@@ -28,7 +28,7 @@ CURRENT_SESSION_DATE = None  # business date = date the session started (survive
 
 def load_config():
     if not os.path.exists(CONFIG_FILE):
-        cfg = {"server_url": "http://192.168.1.153:8765"}
+        cfg = {"server_url": "http://127.0.0.1:8765"}
         save_config(cfg)
         return cfg
     with open(CONFIG_FILE, "r", encoding="utf-8") as f:
@@ -454,7 +454,10 @@ class MainFrame(ttk.Frame):
         except Exception as exc:
             self.feedback.config(text=str(exc), foreground="red")
             return
-        self.sms_all = rows  # newest first
+        
+        # Float unconfirmed ('new') values to the top
+        self.sms_all = sorted(rows, key=lambda r: r.get("status") != "new")
+        
         # Keep the current page valid as new SMS arrive (don't yank back to page 1).
         max_page = max(0, (len(self.sms_all) - 1) // self.SMS_PAGE_SIZE)
         if self.sms_page > max_page:
