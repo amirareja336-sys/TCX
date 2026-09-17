@@ -382,6 +382,8 @@ class MainFrame(ttk.Frame):
         entry_x.grid(row=2, column=0, sticky="ew")
         self.entry_tree.bind("<<TreeviewSelect>>", self.pick_entry)
         ttk.Button(log_box, text="Reverse Selected", command=self.reverse_selected).grid(row=3, column=0, sticky="w", pady=5)
+        self.session_total_label = ttk.Label(log_box, text="Total: 0.00", font=("Segoe UI", 11, "bold"))
+        self.session_total_label.grid(row=3, column=0, sticky="e", pady=5)
 
         sms_box = ttk.LabelFrame(work_area, text="Live Incoming Payments", padding=8)
         sms_box.grid(row=1, column=0, sticky="nsew")
@@ -511,14 +513,23 @@ class MainFrame(ttk.Frame):
             rows = []
         self.server_entries = {str(r["id"]): r for r in rows}
         visible_index = 0
+        total_credit = 0.0
         for r in rows:
             if r["cashier"] == self.cashier and (r.get("session_date") or session_date) == session_date:
                 iid = str(r["id"])
                 tags = ["even" if visible_index % 2 == 0 else "odd"]
                 if r["status"] == "reversed":
                     tags.append("reversed")
+                else:
+                    try:
+                        total_credit += float(r.get("credit", 0) or 0)
+                    except ValueError:
+                        pass
                 self.entry_tree.insert("", "end", iid=iid, values=(r.get("local_excel_id") or "", r["id"], r["timestamp"], r["cashier"], r["bank"], format(r["credit"], ",.2f"), r.get("sms_payment_id") or "", r["status"]), tags=tuple(tags))
                 visible_index += 1
+                
+        if hasattr(self, 'session_total_label'):
+            self.session_total_label.config(text="Total: %s" % format(total_credit, ",.2f"))
         if selected_id and selected_id in self.entry_tree.get_children():
             self.entry_tree.selection_set(selected_id)
             self.entry_tree.focus(selected_id)
