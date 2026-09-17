@@ -1,0 +1,42 @@
+{
+  "admin_token": "f8909b176d9d0f4f9c9f6f4115544d67ef5efdf6d9cde1f82eb11c166e0c8f39",
+  "allowed_cashier_ips": [
+    "192.168.1.0/24",
+    "127.0.0.1",
+    "::1"
+  ],
+  "auth_required": false,
+  "banks": [
+    "Abay",
+    "Amhara",
+    "Awash",
+    "Bank of Abyssinia",
+    "Bunna",
+    "CBE",
+    "Dashen",
+    "Enat",
+    "Hibret",
+    "Lion",
+    "Nib",
+    "Telebirr",
+    "Wegagen",
+    "Zemen"
+  ],
+  "cashiers": [
+    "Adanu",
+    "Bereket",
+    "Ejigayehu",
+    "Emush",
+    "Hewan",
+    "Meaza",
+    "Misrak",
+    "Tigist",
+    "Yemisrach",
+    "Zenebu",
+    "nigel"
+  ],
+  "client_token": "3aff22389526fadf2c8ba69e7981c563e8e624a38a24116a",
+  "ip_allowlist_enabled": false,
+  "keep_xml_files": false,
+  "relay_token": "296f4676ad997787c10d47775a87048b5d215f02d33a0c86"
+}
