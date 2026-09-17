@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 from datetime import datetime
 from pathlib import Path
@@ -249,29 +250,38 @@ def end_current_session():
     CURRENT_CLEAN_FILE = None
 
 
-class SetupFrame(ttk.Frame):
-    def __init__(self, master):
-        ttk.Frame.__init__(self, master, padding=16)
-        self.cfg = load_config()
-        self.server_url = tk.StringVar(value=self.cfg["server_url"])
-        self.pack(fill="both", expand=True)
-        ttk.Label(self, text="Connect to Cred Entry Server", font=("Segoe UI", 14, "bold")).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
-        ttk.Label(self, text="Server URL").grid(row=1, column=0, sticky="w")
-        ttk.Entry(self, textvariable=self.server_url, width=45).grid(row=1, column=1, sticky="ew", pady=4)
-        ttk.Button(self, text="Connect", command=self.connect).grid(row=2, column=1, sticky="e", pady=10)
-        self.columnconfigure(1, weight=1)
-
-    def connect(self):
-        self.cfg["server_url"] = self.server_url.get().strip()
-        save_config(self.cfg)
-        api = Api(self.cfg)
-        try:
-            app_cfg = api.config()
-        except Exception as exc:
-            messagebox.showerror("Connection Error", str(exc))
-            return
-        self.master.open_cashiers(api, app_cfg)
-
+def load_offline_queue(cashier):
+    get_session_files()
+    queue = []
+    if not CURRENT_MARKED_FILE or not Path(CURRENT_MARKED_FILE).exists():
+        return queue
+    
+    try:
+        wb = openpyxl.load_workbook(CURRENT_MARKED_FILE, data_only=True)
+        ws = wb.active
+        headers = [str(c.value) for c in ws[1]]
+        
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            row_dict = dict(zip(headers, row))
+            if str(row_dict.get("Cashier", "")) != cashier:
+                continue
+            if str(row_dict.get("Status", "")) == "reversed":
+                continue
+            if not row_dict.get("ServerEntryID"):
+                queue.append({
+                    "local_excel_id": row_dict.get("ID"),
+                    "timestamp": str(row_dict.get("Timestamp", "")),
+                    "session_date": current_session_date(),
+                    "cashier": cashier,
+                    "bank": str(row_dict.get("Bank", "")),
+                    "credit": str(row_dict.get("Credit", "")),
+                    "source_pc": socket.gethostname(),
+                    "sms_payment_id": row_dict.get("SmsID") or None
+                })
+        wb.close()
+    except Exception:
+        pass
+    return queue
 
 class CashierFrame(ttk.Frame):
     def __init__(self, master, api, app_cfg):
@@ -316,9 +326,12 @@ class MainFrame(ttk.Frame):
         self.sms_page = 0          # current page index for the SMS list
         self.SMS_PAGE_SIZE = 25
         self.entries = []
+        self.offline_queue = load_offline_queue(self.cashier)
+        self.is_online = True
+        self.server_entries_cache = []
         self.pack(fill="both", expand=True)
         self.build()
-        self.refresh_all()
+        self.network_loop()
 
     def build(self):
         style = ttk.Style()
@@ -342,10 +355,9 @@ class MainFrame(ttk.Frame):
         self.credit_entry.grid(row=row + 1, column=0, columnspan=2, sticky="ew", pady=4)
         self.credit_entry.bind("<Return>", lambda _event: self.submit())
         ttk.Button(form, text="Submit", command=self.submit).grid(row=row + 2, column=0, columnspan=2, sticky="ew", pady=4)
-        ttk.Button(form, text="Change Cashier", command=self.master.show_setup).grid(row=row + 3, column=0, columnspan=2, sticky="ew", pady=(16, 0))
-        tk.Button(form, text="End Session & Close", command=self.end_session_with_confirmation, bg="#b91c1c", fg="white", activebackground="#991b1b", activeforeground="white", relief="raised").grid(row=row + 4, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        tk.Button(form, text="End Session & Close", command=self.end_session_with_confirmation, bg="#b91c1c", fg="white", activebackground="#991b1b", activeforeground="white", relief="raised").grid(row=row + 3, column=0, columnspan=2, sticky="ew", pady=(16, 0))
         self.feedback = ttk.Label(form, text="")
-        self.feedback.grid(row=row + 5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.feedback.grid(row=row + 4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         work_area = ttk.Frame(self)
         work_area.grid(row=0, column=1, sticky="nsew")
@@ -428,16 +440,81 @@ class MainFrame(ttk.Frame):
         self.sms_page_label.pack(side="left", padx=8)
         self.sms_next_btn = ttk.Button(pager, text="Next >", command=self.sms_next_page)
         self.sms_next_btn.pack(side="left")
+        
+        self.offline_banner = tk.Label(self.sms_tree, text="OFFLINE - Enter manually", font=("Segoe UI", 16, "bold"), fg="white", bg="#b91c1c")
 
     def select_bank(self, bank):
         self.bank_var.set(bank)
         for name, btn in self.bank_buttons.items():
             btn.config(relief="sunken" if name == bank else "raised", bg="#4db6ac" if name == bank else "#f0f0f0")
 
-    def refresh_all(self):
-        self.refresh_sms()
-        self.refresh_entries()
-        self.after(3000, self.refresh_all)
+    def network_loop(self):
+        try:
+            self.api.config()  # ping
+            was_offline = not self.is_online
+            self.is_online = True
+            
+            if was_offline:
+                self.offline_banner.place_forget()
+                self.feedback.config(text="Connection restored. Syncing...", foreground="green")
+                self.sync_offline_entries()
+                
+            self.refresh_sms()
+            self.refresh_entries()
+        except Exception:
+            self.is_online = False
+            self.offline_banner.place(relx=0, rely=0, relwidth=1, relheight=1)
+            self.refresh_entries()  # to update display with offline queue
+            
+        self.after(3000, self.network_loop)
+        
+    def sync_offline_entries(self):
+        if not self.offline_queue:
+            return
+            
+        try:
+            sms_rows = self.api.sms()
+        except Exception:
+            return
+            
+        remaining_queue = []
+        for payload in self.offline_queue:
+            matched_sms_id = None
+            try:
+                payload_time = datetime.strptime(payload["timestamp"], "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                payload_time = datetime.now()
+                
+            payload_credit = float(payload.get("credit", 0))
+            payload_bank = payload.get("bank")
+            
+            for sms in sms_rows:
+                if sms.get("status") != "new" or sms.get("channel") != payload_bank:
+                    continue
+                try:
+                    sms_amount = float(sms.get("amount", 0))
+                    if abs(sms_amount - payload_credit) > 0.01:
+                        continue
+                    if sms.get("received_at"):
+                        sms_time = datetime.strptime(sms["received_at"], "%Y-%m-%d %H:%M:%S")
+                        diff = abs((sms_time - payload_time).total_seconds())
+                        if diff <= 300:
+                            matched_sms_id = sms["id"]
+                            break
+                except ValueError:
+                    pass
+            
+            payload["sms_payment_id"] = matched_sms_id
+            try:
+                server_entry = self.api.create_entry(payload)
+                update_local_server_entry(payload["local_excel_id"], server_entry["id"], "active")
+            except Exception as exc:
+                if "reach server" in str(exc).lower() or "timeout" in str(exc).lower():
+                    remaining_queue.append(payload)
+                else:
+                    print("Sync error (dropped entry):", exc)
+                    
+        self.offline_queue = remaining_queue
 
     def sms_prev_page(self):
         if self.sms_page > 0:
@@ -504,17 +581,35 @@ class MainFrame(ttk.Frame):
         selected_id = self.selected_entry_id
         for item in self.entry_tree.get_children():
             self.entry_tree.delete(item)
-        # Blank slate per session: only this session's entries (its start/business
-        # date) for this cashier — never a previous session's or cashier's rows.
+            
         session_date = current_session_date()
-        try:
-            rows = self.api.entries(date_from=session_date, date_to=session_date)
-        except Exception:
-            rows = []
+        
+        if self.is_online:
+            try:
+                rows = self.api.entries(date_from=session_date, date_to=session_date)
+                self.server_entries_cache = rows
+            except Exception:
+                rows = getattr(self, "server_entries_cache", [])
+        else:
+            rows = getattr(self, "server_entries_cache", [])
+            
+        display_rows = list(rows)
+        for off_payload in self.offline_queue:
+            display_rows.append({
+                "id": "offline-%s" % off_payload["local_excel_id"],
+                "local_excel_id": off_payload["local_excel_id"],
+                "timestamp": off_payload["timestamp"],
+                "cashier": off_payload["cashier"],
+                "bank": off_payload["bank"],
+                "credit": off_payload["credit"],
+                "sms_payment_id": off_payload.get("sms_payment_id") or "",
+                "status": "offline"
+            })
+            
         self.server_entries = {str(r["id"]): r for r in rows}
         visible_index = 0
         total_credit = 0.0
-        for r in rows:
+        for r in display_rows:
             if r["cashier"] == self.cashier and (r.get("session_date") or session_date) == session_date:
                 iid = str(r["id"])
                 tags = ["even" if visible_index % 2 == 0 else "odd"]
@@ -525,7 +620,13 @@ class MainFrame(ttk.Frame):
                         total_credit += float(r.get("credit", 0) or 0)
                     except ValueError:
                         pass
-                self.entry_tree.insert("", "end", iid=iid, values=(r.get("local_excel_id") or "", r["id"], r["timestamp"], r["cashier"], r["bank"], format(r["credit"], ",.2f"), r.get("sms_payment_id") or "", r["status"]), tags=tuple(tags))
+                    
+                    try:
+                        disp_credit = float(r.get("credit", 0) or 0)
+                    except ValueError:
+                        disp_credit = 0.0
+                        
+                self.entry_tree.insert("", "end", iid=iid, values=(r.get("local_excel_id") or "", r["id"], r["timestamp"], r["cashier"], r["bank"], format(disp_credit, ",.2f"), r.get("sms_payment_id") or "", r["status"]), tags=tuple(tags))
                 visible_index += 1
                 
         if hasattr(self, 'session_total_label'):
@@ -583,11 +684,11 @@ class MainFrame(ttk.Frame):
         payload["local_excel_id"] = local_entry["ID"]
         try:
             server_entry = self.api.create_entry(payload)
+            update_local_server_entry(local_entry["ID"], server_entry["id"])
+            self.feedback.config(text="Logged server entry %s and local backup %s." % (server_entry["id"], local_entry["ID"]), foreground="green")
         except Exception as exc:
             self.feedback.config(text="Saved local backup, server rejected: %s" % exc, foreground="red")
-            return
-        update_local_server_entry(local_entry["ID"], server_entry["id"])
-        self.feedback.config(text="Logged server entry %s and local backup %s." % (server_entry["id"], local_entry["ID"]), foreground="green")
+            self.offline_queue = load_offline_queue(self.cashier)
         self.selected_sms = None
         self.credit_var.set("")
         self.refresh_sms()
@@ -658,15 +759,22 @@ class App(tk.Tk):
             )
         except tk.TclError:
             pass
-        self.show_setup()
+            
+        self.cfg = load_config()
+        self.api = Api(self.cfg)
+        self.after(100, self.auto_connect)
 
     def clear(self):
         for widget in self.winfo_children():
             widget.destroy()
 
-    def show_setup(self):
-        self.clear()
-        SetupFrame(self)
+    def auto_connect(self):
+        try:
+            app_cfg = self.api.config()
+        except Exception as exc:
+            print("Offline mode:", exc)
+            app_cfg = {"cashiers": CASHIERS, "banks": BANKS}
+        self.open_cashiers(self.api, app_cfg)
 
     def open_cashiers(self, api, app_cfg):
         self.clear()
