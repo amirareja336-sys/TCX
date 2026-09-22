@@ -1,0 +1,13 @@
+{
+  "adb_path": "adb",
+  "poll_interval_seconds": 2,
+  "server_url": "http://127.0.0.1:8765",
+  "start_after_id": null,
+  "target_senders": [
+    "127",
+    "CBE",
+    "223",
+    "Awash Bank",
+    "BOA"
+  ]
+}

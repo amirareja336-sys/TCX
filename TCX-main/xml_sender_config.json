@@ -1,0 +1,6 @@
+{
+  "poll_interval_seconds": 0.25,
+  "sent_archive_folder": "C:\\enam-xml-3\\sent",
+  "server_url": "http://127.0.0.1:8765",
+  "watch_folder": "C:\\OrbitHealth\\Common\\POSInterface\\Maraki\\Receipts"
+}

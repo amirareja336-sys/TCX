@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Invoice>
+  <Plant_Code>------</Plant_Code>
+  <Plant_Name>2</Plant_Name>
+  <Username>Aster Areaya</Username>
+  <Invoice_Type>CASH</Invoice_Type>
+  <Reference_Number>INV-57280</Reference_Number>
+  <Invoice_Date>2026-09-18T00:00:00.0000000+00:00</Invoice_Date>
+  <Customer_Code>26467</Customer_Code>
+  <Customer_Name>yidnekachew mustefa ayidashe</Customer_Name>
+  <Customer_TIN>
+  </Customer_TIN>
+  <Payment_Type>Cash</Payment_Type>
+  <Line_Items>
+    <Item_ID>278p1</Item_ID>
+    <Item_Description>Dizinil - Dimenhydrinate - 50mg - Tablet</Item_Description>
+    <Item_Quantity>2</Item_Quantity>
+    <Item_UOM>strip</Item_UOM>
+    <Item_Unit_Price>59</Item_Unit_Price>
+    <Item_Tax_Percent>0</Item_Tax_Percent>
+    <Item_DiscOrAdd_Amount>0</Item_DiscOrAdd_Amount>
+    <Store>
+    </Store>
+    <Line_Item_Type>Ledger Lite</Line_Item_Type>
+  </Line_Items>
+</Invoice>
