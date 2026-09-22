@@ -15,10 +15,9 @@ from openpyxl.styles import PatternFill
 
 from v6_common import BANKS, CASHIERS
 
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(APP_DIR, "client_config.json")
-SESSION_STATE_FILE = "session_state.json"
+APP_DIR = Path(__file__).resolve().parent
+SESSION_STATE_FILE = APP_DIR / "session_state.json"
+CONFIG_FILE = APP_DIR / "client_config.json"
 HEADERS = ["ID", "Timestamp", "Cashier", "Bank", "Credit", "Status", "ServerEntryID", "SmsID"]
 RED_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
 CURRENT_SESSION_DIRECTORY = None
@@ -113,32 +112,34 @@ def get_session_files():
     if Path(SESSION_STATE_FILE).exists():
         try:
             state = json.loads(Path(SESSION_STATE_FILE).read_text())
-            session_dir = state.get("session_directory")
+            saved_dir = state.get("session_directory")
+            session_dir = APP_DIR / Path(saved_dir).name if saved_dir else None
             if session_dir and Path(session_dir).exists():
-                CURRENT_SESSION_DIRECTORY = session_dir
+                CURRENT_SESSION_DIRECTORY = str(session_dir)
                 # Prefer the stored session_date; fall back to the folder name.
                 CURRENT_SESSION_DATE = state.get("session_date") or _session_date_from_dir(session_dir)
                 name = Path(session_dir).name
                 CURRENT_MARKED_FILE = Path(session_dir) / ("marked_%s.xlsx" % name)
                 CURRENT_CLEAN_FILE = Path(session_dir) / ("clean_%s.xlsx" % name)
                 return
-        except Exception:
-            pass
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError("Cannot restore session state: %s" % exc) from exc
+        raise RuntimeError("Saved session folder is missing from the program directory. Restore it before continuing.")
     session_date = today()  # business date fixed at session start
     base = "%s_%s" % (socket.gethostname(), session_date)
-    session_dir = base
+    session_dir = APP_DIR / base
     i = 1
     while Path(session_dir).exists() and any(Path(session_dir).iterdir()):
-        session_dir = "%s_%s" % (base, i)
+        session_dir = APP_DIR / ("%s_%s" % (base, i))
         i += 1
     Path(session_dir).mkdir(exist_ok=True)
-    CURRENT_SESSION_DIRECTORY = session_dir
+    CURRENT_SESSION_DIRECTORY = str(session_dir)
     CURRENT_SESSION_DATE = session_date
     name = Path(session_dir).name
     CURRENT_MARKED_FILE = Path(session_dir) / ("marked_%s.xlsx" % name)
     CURRENT_CLEAN_FILE = Path(session_dir) / ("clean_%s.xlsx" % name)
     Path(SESSION_STATE_FILE).write_text(json.dumps(
-        {"session_directory": session_dir, "session_date": session_date}, indent=2))
+        {"session_directory": str(session_dir), "session_date": session_date}, indent=2))
 
 
 def current_session_date() -> str:
@@ -196,7 +197,7 @@ def save_local_entry(entry):
     return entry
 
 
-def mark_local_deleted(local_id):
+def mark_local_deleted(local_id, cashier):
     get_session_files()
     for path, hard_delete in ((CURRENT_MARKED_FILE, False), (CURRENT_CLEAN_FILE, True)):
         if not Path(path).exists():
@@ -204,7 +205,7 @@ def mark_local_deleted(local_id):
         wb = openpyxl.load_workbook(path)
         ws = wb.active
         for idx in range(ws.max_row, 1, -1):
-            if str(ws.cell(idx, 1).value) == str(local_id):
+            if str(ws.cell(idx, 1).value) == str(local_id) and str(ws.cell(idx, 3).value) == cashier:
                 if hard_delete:
                     ws.delete_rows(idx)
                 else:
@@ -217,7 +218,7 @@ def mark_local_deleted(local_id):
         wb.close()
 
 
-def update_local_server_entry(local_id, server_entry_id, status="active"):
+def update_local_server_entry(local_id, server_entry_id, cashier, status="active"):
     get_session_files()
     for path in (CURRENT_MARKED_FILE, CURRENT_CLEAN_FILE):
         if not Path(path).exists():
@@ -232,7 +233,7 @@ def update_local_server_entry(local_id, server_entry_id, status="active"):
             wb.close()
             continue
         for idx in range(ws.max_row, 1, -1):
-            if str(ws.cell(idx, 1).value) == str(local_id):
+            if str(ws.cell(idx, 1).value) == str(local_id) and str(ws.cell(idx, 3).value) == cashier:
                 ws.cell(idx, server_col).value = server_entry_id
                 ws.cell(idx, status_col).value = status
                 break
@@ -250,38 +251,42 @@ def end_current_session():
     CURRENT_CLEAN_FILE = None
 
 
-def load_offline_queue(cashier):
+def load_local_entries(cashier):
+    """Restore the complete local audit history, including synced and reversed rows."""
     get_session_files()
-    queue = []
     if not CURRENT_MARKED_FILE or not Path(CURRENT_MARKED_FILE).exists():
-        return queue
-    
+        return []
+    wb = openpyxl.load_workbook(CURRENT_MARKED_FILE, data_only=True)
     try:
-        wb = openpyxl.load_workbook(CURRENT_MARKED_FILE, data_only=True)
         ws = wb.active
         headers = [str(c.value) for c in ws[1]]
-        
-        for row in ws.iter_rows(min_row=2, values_only=True):
-            row_dict = dict(zip(headers, row))
-            if str(row_dict.get("Cashier", "")) != cashier:
+        entries = []
+        for values in ws.iter_rows(min_row=2, values_only=True):
+            row = dict(zip(headers, values))
+            if str(row.get("Cashier", "")) != cashier:
                 continue
-            if str(row_dict.get("Status", "")) == "reversed":
-                continue
-            if not row_dict.get("ServerEntryID"):
-                queue.append({
-                    "local_excel_id": row_dict.get("ID"),
-                    "timestamp": str(row_dict.get("Timestamp", "")),
-                    "session_date": current_session_date(),
-                    "cashier": cashier,
-                    "bank": str(row_dict.get("Bank", "")),
-                    "credit": str(row_dict.get("Credit", "")),
-                    "source_pc": socket.gethostname(),
-                    "sms_payment_id": row_dict.get("SmsID") or None
-                })
+            server_id = row.get("ServerEntryID")
+            entries.append({
+                "id": server_id or "offline-%s" % row.get("ID"),
+                "local_excel_id": row.get("ID"),
+                "timestamp": str(row.get("Timestamp") or ""),
+                "session_date": current_session_date(),
+                "cashier": cashier,
+                "bank": str(row.get("Bank") or ""),
+                "credit": str(row.get("Credit") or "0"),
+                "source_pc": socket.gethostname(),
+                "sms_payment_id": row.get("SmsID") or None,
+                "status": row.get("Status") or ("active" if server_id else "offline"),
+            })
+        return entries
+    finally:
         wb.close()
-    except Exception:
-        pass
-    return queue
+
+
+def load_offline_queue(cashier):
+    return [{k: v for k, v in row.items() if k not in ("id", "status")}
+            for row in load_local_entries(cashier)
+            if str(row["id"]).startswith("offline-") and row["status"] != "reversed"]
 
 class CashierFrame(ttk.Frame):
     def __init__(self, master, api, app_cfg):
@@ -450,24 +455,24 @@ class MainFrame(ttk.Frame):
 
     def network_loop(self):
         try:
-            self.api.config()  # ping
-            was_offline = not self.is_online
-            self.is_online = True
-            
-            if was_offline:
+            try:
+                self.api.config()
+            except Exception as exc:
+                self.is_online = False
+                self.offline_banner.place(relx=0, rely=0, relwidth=1, relheight=1)
+                self.feedback.config(text=str(exc), foreground="red")
+            else:
+                self.is_online = True
                 self.offline_banner.place_forget()
-                self.feedback.config(text="Connection restored. Syncing...", foreground="green")
                 self.sync_offline_entries()
-                
-            self.refresh_sms()
+                self.refresh_sms()
             self.refresh_entries()
-        except Exception:
-            self.is_online = False
-            self.offline_banner.place(relx=0, rely=0, relwidth=1, relheight=1)
-            self.refresh_entries()  # to update display with offline queue
-            
-        self.after(3000, self.network_loop)
-        
+        except Exception as exc:
+            # A local storage or display failure is not a network outage.
+            self.feedback.config(text="Refresh failed: %s" % exc, foreground="red")
+        finally:
+            self.after(3000, self.network_loop)
+
     def sync_offline_entries(self):
         if not self.offline_queue:
             return
@@ -479,16 +484,23 @@ class MainFrame(ttk.Frame):
             
         remaining_queue = []
         for payload in self.offline_queue:
-            matched_sms_id = None
+            matched_sms_id = payload.get("sms_payment_id")
             try:
                 payload_time = datetime.strptime(payload["timestamp"], "%Y-%m-%d %H:%M:%S")
             except ValueError:
                 payload_time = datetime.now()
                 
-            payload_credit = float(payload.get("credit", 0))
+            try:
+                payload_credit = float(payload.get("credit", 0))
+            except (ValueError, TypeError):
+                remaining_queue.append(payload)
+                self.feedback.config(text="Pending entry has an invalid amount; review the local backup.", foreground="red")
+                continue
             payload_bank = payload.get("bank")
             
             for sms in sms_rows:
+                if matched_sms_id is not None:
+                    break
                 if sms.get("status") != "new" or sms.get("channel") != payload_bank:
                     continue
                 try:
@@ -506,13 +518,18 @@ class MainFrame(ttk.Frame):
             
             payload["sms_payment_id"] = matched_sms_id
             try:
-                server_entry = self.api.create_entry(payload)
-                update_local_server_entry(payload["local_excel_id"], server_entry["id"], "active")
-            except Exception as exc:
-                if "reach server" in str(exc).lower() or "timeout" in str(exc).lower():
-                    remaining_queue.append(payload)
+                if payload.get("_server_entry_id"):
+                    server_entry = {"id": payload["_server_entry_id"]}
                 else:
-                    print("Sync error (dropped entry):", exc)
+                    server_entry = self.api.create_entry({k: v for k, v in payload.items() if not k.startswith("_")})
+                    payload["_server_entry_id"] = server_entry["id"]
+                update_local_server_entry(payload["local_excel_id"], server_entry["id"], self.cashier)
+                for sms in sms_rows:
+                    if sms["id"] == matched_sms_id:
+                        sms["status"] = "logged"
+            except Exception as exc:
+                remaining_queue.append(payload)
+                self.feedback.config(text="Entry still pending: %s" % exc, foreground="red")
                     
         self.offline_queue = remaining_queue
 
@@ -593,19 +610,11 @@ class MainFrame(ttk.Frame):
         else:
             rows = getattr(self, "server_entries_cache", [])
             
-        display_rows = list(rows)
-        for off_payload in self.offline_queue:
-            display_rows.append({
-                "id": "offline-%s" % off_payload["local_excel_id"],
-                "local_excel_id": off_payload["local_excel_id"],
-                "timestamp": off_payload["timestamp"],
-                "cashier": off_payload["cashier"],
-                "bank": off_payload["bank"],
-                "credit": off_payload["credit"],
-                "sms_payment_id": off_payload.get("sms_payment_id") or "",
-                "status": "offline"
-            })
-            
+        # Server results take precedence; Excel fills gaps after restart/offline.
+        combined = {str(r["id"]): r for r in load_local_entries(self.cashier)}
+        combined.update({str(r["id"]): r for r in rows})
+        display_rows = list(combined.values())
+
         self.server_entries = {str(r["id"]): r for r in rows}
         visible_index = 0
         total_credit = 0.0
@@ -613,19 +622,15 @@ class MainFrame(ttk.Frame):
             if r["cashier"] == self.cashier and (r.get("session_date") or session_date) == session_date:
                 iid = str(r["id"])
                 tags = ["even" if visible_index % 2 == 0 else "odd"]
+                try:
+                    disp_credit = float(r.get("credit", 0) or 0)
+                except (ValueError, TypeError):
+                    disp_credit = 0.0
                 if r["status"] == "reversed":
                     tags.append("reversed")
                 else:
-                    try:
-                        total_credit += float(r.get("credit", 0) or 0)
-                    except ValueError:
-                        pass
-                    
-                    try:
-                        disp_credit = float(r.get("credit", 0) or 0)
-                    except ValueError:
-                        disp_credit = 0.0
-                        
+                    total_credit += disp_credit
+
                 self.entry_tree.insert("", "end", iid=iid, values=(r.get("local_excel_id") or "", r["id"], r["timestamp"], r["cashier"], r["bank"], format(disp_credit, ",.2f"), r.get("sms_payment_id") or "", r["status"]), tags=tuple(tags))
                 visible_index += 1
                 
@@ -677,18 +682,23 @@ class MainFrame(ttk.Frame):
             "credit": credit,
             "source_pc": socket.gethostname(),
         }
-        local_entry = save_local_entry({
-            "Timestamp": payload["timestamp"], "Cashier": self.cashier, "Bank": bank,
-            "Credit": credit, "Status": "", "SmsID": sms_id or "",
-        })
+        try:
+            local_entry = save_local_entry({
+                "Timestamp": payload["timestamp"], "Cashier": self.cashier, "Bank": bank,
+                "Credit": credit, "Status": "", "SmsID": sms_id or "",
+            })
+        except Exception as exc:
+            messagebox.showerror("Local Backup Error", "Could not save the backup. Check folder permissions and close Excel before retrying.\n%s" % exc)
+            return
         payload["local_excel_id"] = local_entry["ID"]
         try:
             server_entry = self.api.create_entry(payload)
-            update_local_server_entry(local_entry["ID"], server_entry["id"])
+            payload["_server_entry_id"] = server_entry["id"]
+            update_local_server_entry(local_entry["ID"], server_entry["id"], self.cashier)
             self.feedback.config(text="Logged server entry %s and local backup %s." % (server_entry["id"], local_entry["ID"]), foreground="green")
         except Exception as exc:
             self.feedback.config(text="Saved local backup, server rejected: %s" % exc, foreground="red")
-            self.offline_queue = load_offline_queue(self.cashier)
+            self.offline_queue.append(payload)
         self.selected_sms = None
         self.credit_var.set("")
         self.refresh_sms()
@@ -700,9 +710,23 @@ class MainFrame(ttk.Frame):
             return
         vals = self.entry_tree.item(selected[0], "values")
         server_id = selected[0]
+        pending = next((p for p in self.offline_queue
+                        if "offline-%s" % p["local_excel_id"] == server_id), None)
+        if pending and pending.get("_server_entry_id"):
+            server_id = str(pending["_server_entry_id"])
         if not server_id:
             return
         if not messagebox.askyesno("Reverse Entry", "Reverse server entry %s?" % server_id):
+            return
+        if server_id.startswith("offline-"):
+            try:
+                mark_local_deleted(vals[0], self.cashier)
+                self.offline_queue = load_offline_queue(self.cashier)
+            except Exception as exc:
+                messagebox.showerror("Reverse Error", str(exc))
+                return
+            self.feedback.config(text="Reversed local entry %s." % vals[0], foreground="blue")
+            self.refresh_entries()
             return
         try:
             self.api.reverse_entry(server_id, self.cashier, "cashier reversal")
@@ -710,9 +734,14 @@ class MainFrame(ttk.Frame):
             messagebox.showerror("Reverse Error", str(exc))
             return
         local_id = vals[0] if vals else ""
+        if pending:
+            self.offline_queue.remove(pending)
+        for row in self.server_entries_cache:
+            if str(row["id"]) == server_id:
+                row["status"] = "reversed"
         if local_id:
             try:
-                mark_local_deleted(local_id)
+                mark_local_deleted(local_id, self.cashier)
             except Exception as exc:
                 messagebox.showwarning("Local Backup Warning", "Server entry was reversed, but the local Excel backup could not be updated:\n%s" % exc)
         self.feedback.config(text="Reversed entry %s." % server_id, foreground="blue")
@@ -781,6 +810,17 @@ class App(tk.Tk):
         CashierFrame(self, api, app_cfg)
 
     def open_main(self, api, app_cfg, cashier):
+        try:
+            get_session_files()
+            load_local_entries(cashier)
+        except Exception as exc:
+            messagebox.showerror(
+                "Session Recovery Error",
+                "Cannot open the saved session in:\n%s\n\n%s\n\n"
+                "Restore the session folder here if it was stored elsewhere, "
+                "and check that the Excel backup is readable." % (APP_DIR, exc),
+            )
+            return
         self.clear()
         MainFrame(self, api, app_cfg, cashier)
 
